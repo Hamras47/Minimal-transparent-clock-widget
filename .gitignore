@@ -1,0 +1,16 @@
+# Nothing here belongs in a repo: it is either personal, machine-specific, or
+# regenerated the moment the widget starts.
+.venv/
+__pycache__/
+.ruff_cache/
+
+# Preferences and the log: per-user, and rewritten constantly.
+config.json
+widget.log
+
+# The tray icon is shipped in assets/.  The widget no longer paints a capture of the desktop
+# behind itself (see the README: that design is what caused the frozen taskbar thumbnails), and
+# the `ui/` folder it lived in is gone.
+
+# Scratch space and a running widget's by-products.
+tmp/

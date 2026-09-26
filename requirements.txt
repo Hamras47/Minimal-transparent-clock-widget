@@ -1,0 +1,9 @@
+# Time and date desktop widget — runtime dependencies.
+#
+# There is no pywebview any more.  This widget used to be a browser page in a transparent
+# window, and that is exactly what stopped it from having no background: a WebView2 window
+# composites its own output, so every pixel of it stays painted whatever colour key is set.
+# The face is drawn with pillow and handed to Windows as a per-pixel alpha layered window,
+# which is how the widget can be nothing but text on the wallpaper.
+pystray==0.19.5
+pillow==12.3.0
