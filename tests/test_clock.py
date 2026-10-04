@@ -101,6 +101,15 @@ class FaceTests(unittest.TestCase):
         moment = datetime(2026, 9, 26, 15, 7)
         self.assertEqual(clock.face(moment, True)[1], clock.face(moment, False)[1])
 
+    def test_seconds_in_both_faces(self):
+        moment = datetime(2026, 9, 26, 15, 7, 4)
+        self.assertEqual(clock.face(moment, True, seconds=True)[0], "15:07:04")
+        self.assertEqual(clock.face(moment, False, seconds=True)[0], "3:07:04 pm")
+
+    def test_a_hidden_date_is_an_empty_line(self):
+        moment = datetime(2026, 9, 26, 15, 7)
+        self.assertEqual(clock.face(moment, True, show_date=False), ("15:07", ""))
+
     def test_the_tooltip_carries_both_lines(self):
         tooltip = clock.tip(datetime(2026, 9, 26, 15, 7), True)
         self.assertEqual(tooltip, "15:07  ·  Saturday, 26 September 2026")

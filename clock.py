@@ -55,18 +55,21 @@ def date_text(moment: datetime) -> str:
     return f"{DAYS[moment.weekday()]}, {moment.day} {MONTHS[moment.month - 1]} {moment.year}"
 
 
-def time_text(moment: datetime, hour24: bool = True) -> str:
-    """e.g. ``15:07`` or ``3:07 pm``."""
+def time_text(moment: datetime, hour24: bool = True, seconds: bool = False) -> str:
+    """e.g. ``15:07``, ``3:07 pm``, or with seconds ``15:07:42`` / ``3:07:42 pm``."""
+    tail = f":{moment.second:02d}" if seconds else ""
     if hour24:
-        return f"{moment.hour:02d}:{moment.minute:02d}"
+        return f"{moment.hour:02d}:{moment.minute:02d}{tail}"
     hour = moment.hour % 12 or 12
     meridiem = "am" if moment.hour < 12 else "pm"
-    return f"{hour}:{moment.minute:02d} {meridiem}"
+    return f"{hour}:{moment.minute:02d}{tail} {meridiem}"
 
 
-def face(moment: datetime, hour24: bool = True) -> tuple[str, str]:
-    """The two lines, as the page draws them."""
-    return time_text(moment, hour24), date_text(moment)
+def face(
+    moment: datetime, hour24: bool = True, seconds: bool = False, show_date: bool = True
+) -> tuple[str, str]:
+    """The two lines, as the page draws them.  A hidden date is an empty second line."""
+    return time_text(moment, hour24, seconds), date_text(moment) if show_date else ""
 
 
 def wait_for_next_change(moment: datetime, hour24: bool = True) -> float:

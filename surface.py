@@ -27,6 +27,7 @@ Three consequences worth knowing:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
@@ -36,6 +37,45 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 DISPLAY_FONTS = ("bahnschrift.ttf", "seguisb.ttf", "segoeui.ttf")
 TEXT_FONTS = ("segoeui.ttf", "segoeuib.ttf", "arial.ttf")
 ICON_FONTS = ("segmdl2.ttf", "seguisym.ttf")
+
+#: The faces on offer, all of which ship with Windows 11: key -> (menu label, time face, date
+#: face).  A face is (file, variable-font instance or None).  A file that is missing falls back
+#: to the default pair, so a choice saved on another machine never breaks the widget.
+FONTS: dict[str, tuple[str, tuple[str, str | None], tuple[str, str | None]]] = {
+    "bahnschrift": ("Bahnschrift", ("bahnschrift.ttf", None), ("segoeui.ttf", None)),
+    "condensed": (
+        "Bahnschrift Condensed",
+        ("bahnschrift.ttf", "SemiBold Condensed"),
+        ("bahnschrift.ttf", "Condensed"),
+    ),
+    "thin": ("Segoe UI Light", ("segoeuil.ttf", None), ("segoeuil.ttf", None)),
+    "black": ("Segoe UI Black", ("seguibl.ttf", None), ("seguisb.ttf", None)),
+    "mono": ("Consolas", ("consola.ttf", None), ("consola.ttf", None)),
+    "georgia": ("Georgia", ("georgia.ttf", None), ("georgiai.ttf", None)),
+    "palatino": ("Palatino", ("pala.ttf", None), ("palai.ttf", None)),
+    "impact": ("Impact", ("impact.ttf", None), ("bahnschrift.ttf", "Condensed")),
+    "script": ("Segoe Script", ("segoesc.ttf", None), ("segoepr.ttf", None)),
+    "inkfree": ("Ink Free", ("Inkfree.ttf", None), ("Inkfree.ttf", None)),
+    "gabriola": ("Gabriola", ("Gabriola.ttf", None), ("Gabriola.ttf", None)),
+}
+DEFAULT_FONT = "bahnschrift"
+
+#: Colours on offer: key -> (menu label, RGB).  "auto" is the original behaviour: white or
+#: near-black depending on the wallpaper behind the widget.
+COLOURS: dict[str, tuple[str, tuple[int, int, int] | None]] = {
+    "auto": ("Auto (follow wallpaper)", None),
+    "white": ("White", (255, 255, 255)),
+    "black": ("Black", (15, 21, 28)),
+    "mint": ("Mint", (94, 231, 155)),
+    "cyan": ("Cyan", (64, 224, 240)),
+    "sky": ("Sky blue", (110, 175, 255)),
+    "lavender": ("Lavender", (190, 160, 255)),
+    "pink": ("Pink", (255, 130, 200)),
+    "coral": ("Coral", (255, 120, 100)),
+    "orange": ("Orange", (255, 165, 60)),
+    "gold": ("Gold", (255, 210, 90)),
+}
+DEFAULT_COLOUR = "auto"
 
 #: The gear, from Segoe MDL2 Assets.
 GEAR = "\ue713"
@@ -57,11 +97,12 @@ CORNER_CSS = 20.0
 #: reason the widget can be moved without a visible surface.
 HIT_ALPHA = 1
 
-#: Time: 16% of the width, clamped like the CSS did; date: 6.2%.
+#: Time: 16% of the width; date: 6.2%.  The ceilings are high so the widget can be made
+#: genuinely big, from the Size menu or by dragging the corner.
 TIME_FRACTION = 0.16
-TIME_MIN, TIME_MAX = 24.0, 42.0
+TIME_MIN, TIME_MAX = 24.0, 200.0
 DATE_FRACTION = 0.062
-DATE_MIN, DATE_MAX = 11.0, 14.0
+DATE_MIN, DATE_MAX = 11.0, 60.0
 
 INK = {
     #: ink colour, second line, halo colour, second-line alpha, hover alpha
@@ -102,6 +143,44 @@ def _clamp(low: float, value: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+@lru_cache(maxsize=64)
+def _face(name: str, variation: str | None, size: int) -> ImageFont.FreeTypeFont | None:
+    """One face at one size, or None if the file is not on this machine."""
+    path = Path(r"C:\Windows\Fonts") / name
+    if not path.exists():
+        return None
+    try:
+        font = ImageFont.truetype(str(path), size)
+        if variation:
+            font.set_variation_by_name(variation)
+        return font
+    except (OSError, ValueError):
+        return None
+
+
+def _chosen(font: str, line: int, size: float) -> ImageFont.FreeTypeFont:
+    """The time (line 0) or date (line 1) face of a font choice, falling back to the default."""
+    spec = FONTS.get(font, FONTS[DEFAULT_FONT])[1 + line]
+    found = _face(spec[0], spec[1], max(1, int(round(size))))
+    if found is not None:
+        return found
+    return _font(DISPLAY_FONTS if line == 0 else TEXT_FONTS, size)
+
+
+def colours_for(colour: str, ink: str) -> tuple[tuple, tuple, tuple[int, int, int], int]:
+    """(ink, second line, halo, second-line alpha) for a colour choice.
+
+    A fixed colour gets the halo that contrasts with it, so a light colour keeps a dark halo
+    and black keeps a light one, whatever the wallpaper does.
+    """
+    rgb = COLOURS.get(colour, COLOURS[DEFAULT_COLOUR])[1]
+    if rgb is None:
+        return INK.get(ink, INK["light"])
+    luminance = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255
+    halo = (255, 255, 255) if luminance < 0.35 else (0, 0, 0)
+    return (*rgb, 255), (*rgb, 230), halo, 224
+
+
 def _font(candidates: tuple[str, ...], size: float) -> ImageFont.FreeTypeFont:
     """The first installed font from the list, or PIL's built-in face as a last resort."""
     for name in candidates:
@@ -115,7 +194,12 @@ def _font(candidates: tuple[str, ...], size: float) -> ImageFont.FreeTypeFont:
 
 
 def measure(
-    time_text: str, date_text: str, width: int, height: int, scale: float
+    time_text: str,
+    date_text: str,
+    width: int,
+    height: int,
+    scale: float,
+    font: str = DEFAULT_FONT,
 ) -> tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont, tuple[float, float, float, float]]:
     """Work out the two sizes and the text block's box, without drawing anything.
 
@@ -125,15 +209,15 @@ def measure(
     width_css = width / scale
     time_size = _clamp(TIME_MIN, width_css * TIME_FRACTION, TIME_MAX)
     date_size = _clamp(DATE_MIN, width_css * DATE_FRACTION, DATE_MAX)
-    time_font = _font(DISPLAY_FONTS, time_size * scale)
-    date_font = _font(TEXT_FONTS, date_size * scale)
+    time_font = _chosen(font, 0, time_size * scale)
+    date_font = _chosen(font, 1, date_size * scale)
 
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     time_box = probe.textbbox((0, 0), time_text, font=time_font)
-    date_box = probe.textbbox((0, 0), date_text, font=date_font)
+    date_box = probe.textbbox((0, 0), date_text, font=date_font) if date_text else (0, 0, 0, 0)
     time_h = time_box[3] - time_box[1]
     date_h = date_box[3] - date_box[1]
-    block_h = time_h + GAP * scale + date_h
+    block_h = time_h + (GAP * scale + date_h if date_text else 0)
     left = PAD_X * scale
     top = max(PAD_Y * scale, (height - block_h) / 2)
     width_needed = max(
@@ -144,10 +228,12 @@ def measure(
 
 
 def fit_size(
-    time_text: str, date_text: str, width: int, scale: float
+    time_text: str, date_text: str, width: int, scale: float, font: str = DEFAULT_FONT
 ) -> tuple[int, int]:
     """The window size that exactly holds the two lines at the given width."""
-    _, _, (_, _, needed_w, needed_h) = measure(time_text, date_text, width, 2000, scale)
+    _, _, (_, _, needed_w, needed_h) = measure(
+        time_text, date_text, width, 2000, scale, font
+    )
     return int(round(needed_w)), int(round(needed_h))
 
 
@@ -159,16 +245,17 @@ def render(
     height: int,
     scale: float = 1.0,
     hover: bool = False,
+    font: str = DEFAULT_FONT,
+    colour: str = DEFAULT_COLOUR,
 ) -> Render:
     """Draw one face.
 
     The image is transparent except for the glyphs, the gear and the one-step draggable
     block, so whatever the host puts on screen is the widget: no background, no rim, no edge.
     """
-    colours = INK.get(ink, INK["light"])
-    (ink_rgba, soft_rgba, halo_rgb, soft_alpha) = colours
+    (ink_rgba, soft_rgba, halo_rgb, soft_alpha) = colours_for(colour, ink)
     time_font, date_font, (left, top, _, _) = measure(
-        time_text, date_text, width, height, scale
+        time_text, date_text, width, height, scale, font
     )
 
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -176,7 +263,11 @@ def render(
     time_xy = (left, top)
     time_box = draw.textbbox(time_xy, time_text, font=time_font)
     date_xy = (left, time_box[3] + GAP * scale)
-    date_box = draw.textbbox(date_xy, date_text, font=date_font)
+    date_box = (
+        draw.textbbox(date_xy, date_text, font=date_font)
+        if date_text
+        else (time_box[0], time_box[3], time_box[2], time_box[3])
+    )
 
     # The halo first, on its own layer, so blurring it does not soften the glyphs.  It is the
     # only thing standing between the text and a busy patch of wallpaper.

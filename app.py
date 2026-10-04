@@ -126,6 +126,24 @@ ERROR_CLASS_ALREADY_EXISTS = 1410
 #: apart: one list defines both.
 MENU_HOUR24, MENU_ON_TOP, MENU_DESKTOP, MENU_DRAGGABLE, MENU_AUTOSTART = range(1, 6)
 MENU_FIT, MENU_FOLDER, MENU_HIDE, MENU_QUIT = range(6, 10)
+MENU_SECONDS, MENU_DATE = range(10, 12)
+#: The three pick-one submenus: ids are the base plus the choice's index in its list.
+MENU_SIZE_BASE, MENU_FONT_BASE, MENU_COLOUR_BASE = 100, 200, 300
+MF_POPUP = 0x0010
+
+#: Size presets: key -> (menu label, window width in CSS pixels).  The text scales with the
+#: width, so a preset is just a width; the height is then fitted to the text.
+SIZES = {
+    "small": ("Small", 150),
+    "medium": ("Medium", 210),
+    "large": ("Large", 300),
+    "xlarge": ("Extra large", 430),
+    "huge": ("Huge", 620),
+    "giant": ("Giant", 900),
+}
+FONT_KEYS = list(surface.FONTS)
+COLOUR_KEYS = list(surface.COLOURS)
+SIZE_KEYS = list(SIZES)
 
 
 class BLENDFUNCTION(ctypes.Structure):
@@ -342,6 +360,11 @@ def load_config() -> dict:
         "stay_on_desktop": True,
         "draggable": True,
         "hour24": False,
+        "seconds": False,
+        "show_date": True,
+        "size": "custom",
+        "font": surface.DEFAULT_FONT,
+        "colour": surface.DEFAULT_COLOUR,
         "window": None,
     }
     try:
@@ -427,6 +450,16 @@ def set_autostart(enabled: bool) -> bool:
         return False
 
 
+def face_for(config: dict, moment: datetime) -> tuple[str, str]:
+    """The two lines, as the config asks for them."""
+    return engine.face(
+        moment,
+        bool(config.get("hour24", False)),
+        bool(config.get("seconds", False)),
+        bool(config.get("show_date", True)),
+    )
+
+
 def tray_image(size: int = 64) -> Image.Image:
     """The tray icon: the family's dot, drawn rather than shipped as a file."""
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -448,7 +481,7 @@ class Widget:
         self.hwnd = 0
         self.hover = False
         self.ink = "light"
-        self.face = engine.face(datetime.now(), bool(self.config["hour24"]))
+        self.face = self.current_face()
         self.picture: surface.Render | None = None
         self.icon: pystray.Icon | None = None
         self.stop = threading.Event()
@@ -464,6 +497,13 @@ class Widget:
         self._desktop_streak = 0
 
     # -------------------------------------------------------------- basics
+
+    def current_face(self) -> tuple[str, str]:
+        return face_for(self.config, datetime.now())
+
+    @property
+    def font(self) -> str:
+        return str(self.config.get("font", surface.DEFAULT_FONT))
 
     @property
     def scale(self) -> float:
@@ -501,7 +541,9 @@ class Widget:
                 max(MIN_CSS[1], int(saved["height"])),
             )
         scale = 1.0 if not self.hwnd else self.scale
-        fit_width, fit_height = surface.fit_size(*self.face, int(200 * scale), scale)
+        fit_width, fit_height = surface.fit_size(
+            *self.face, int(200 * scale), scale, self.font
+        )
         left, top, _, _ = monitor_work_area()
         return (
             int((left + 48 * scale) / scale),
@@ -590,16 +632,27 @@ class Widget:
         if width <= 0 or height <= 0:
             return
         picture = surface.render(
-            self.face[0], self.face[1], self.ink, width, height, self.scale, self.hover
+            self.face[0],
+            self.face[1],
+            self.ink,
+            width,
+            height,
+            self.scale,
+            self.hover,
+            font=self.font,
+            colour=str(self.config.get("colour", surface.DEFAULT_COLOUR)),
         )
         self.picture = picture
         self.paint(picture)
 
     def refresh(self, why: str = "") -> None:
-        face = engine.face(datetime.now(), bool(self.config["hour24"]))
+        face = self.current_face()
         if face != self.face:
+            minute_changed = face[0][:5] != self.face[0][:5] or face[1] != self.face[1]
             self.face = face
-            log(f"face -> {face[0]}  {face[1]}")
+            # With seconds on the face changes every second; logging that would flood the log.
+            if minute_changed:
+                log(f"face -> {face[0]}  {face[1]}")
         elif not why:
             return
         self.draw()
@@ -735,8 +788,11 @@ class Widget:
                 time.sleep(0.01)
         finally:
             user32.ReleaseCapture()
+            # A hand-made size is no longer one of the presets.
+            self.config["size"] = "custom"
             self.draw()
             self.save_geometry()
+            self.refresh_tray()
 
     def cursor_over_widget(self) -> bool:
         """Is the pointer on the widget -- meaning on its text, not in its transparent margins.
@@ -767,6 +823,8 @@ class Widget:
         """The one list both menus are built from: the widget's own and the tray's."""
         return [
             (MENU_HOUR24, "24-hour clock", bool(self.config["hour24"])),
+            (MENU_SECONDS, "Show seconds", bool(self.config.get("seconds", False))),
+            (MENU_DATE, "Show date", bool(self.config.get("show_date", True))),
             (MENU_ON_TOP, "Always on top", bool(self.config["on_top"])),
             (
                 MENU_DESKTOP,
@@ -777,8 +835,49 @@ class Widget:
             (MENU_AUTOSTART, "Start with Windows", autostart_installed()),
         ]
 
+    def submenus(self) -> list[tuple[str, list[tuple[int, str, bool]]]]:
+        """The pick-one menus (size, font, colour), shared by both menus like menu_items."""
+        size = self.config.get("size", "custom")
+        font = self.font
+        colour = self.config.get("colour", surface.DEFAULT_COLOUR)
+        return [
+            (
+                "Size",
+                [
+                    (MENU_SIZE_BASE + index, SIZES[key][0], key == size)
+                    for index, key in enumerate(SIZE_KEYS)
+                ],
+            ),
+            (
+                "Font",
+                [
+                    (MENU_FONT_BASE + index, surface.FONTS[key][0], key == font)
+                    for index, key in enumerate(FONT_KEYS)
+                ],
+            ),
+            (
+                "Colour",
+                [
+                    (MENU_COLOUR_BASE + index, surface.COLOURS[key][0], key == colour)
+                    for index, key in enumerate(COLOUR_KEYS)
+                ],
+            ),
+        ]
+
     def native_menu(self) -> int:
         menu = int(user32.CreatePopupMenu() or 0)
+        for label, entries in self.submenus():
+            child = int(user32.CreatePopupMenu() or 0)
+            for ident, text, checked in entries:
+                user32.AppendMenuW(
+                    wintypes.HMENU(child),
+                    MF_STRING | (MF_CHECKED if checked else 0),
+                    ident,
+                    text,
+                )
+            # DestroyMenu on the parent destroys attached submenus too.
+            user32.AppendMenuW(wintypes.HMENU(menu), MF_STRING | MF_POPUP, child, label)
+        user32.AppendMenuW(wintypes.HMENU(menu), MF_SEPARATOR, 0, None)
         for ident, label, checked in self.menu_items():
             user32.AppendMenuW(
                 wintypes.HMENU(menu),
@@ -824,7 +923,26 @@ class Widget:
         """Do what a menu item says.  Shared by both menus, since both send the same ids."""
         if ident == MENU_HOUR24:
             self.config["hour24"] = not bool(self.config["hour24"])
-            self.refresh("hour24")
+            self.refresh_fitted("hour24")
+        elif ident == MENU_SECONDS:
+            self.config["seconds"] = not bool(self.config.get("seconds", False))
+            self.refresh_fitted("seconds")
+        elif ident == MENU_DATE:
+            self.config["show_date"] = not bool(self.config.get("show_date", True))
+            self.refresh_fitted("date")
+        elif MENU_SIZE_BASE <= ident < MENU_SIZE_BASE + len(SIZE_KEYS):
+            key = SIZE_KEYS[ident - MENU_SIZE_BASE]
+            self.config["size"] = key
+            log(f"size -> {key}")
+            self.resize_to(SIZES[key][1])
+        elif MENU_FONT_BASE <= ident < MENU_FONT_BASE + len(FONT_KEYS):
+            self.config["font"] = FONT_KEYS[ident - MENU_FONT_BASE]
+            log(f"font -> {self.config['font']}")
+            self.refresh_fitted("font")
+        elif MENU_COLOUR_BASE <= ident < MENU_COLOUR_BASE + len(COLOUR_KEYS):
+            self.config["colour"] = COLOUR_KEYS[ident - MENU_COLOUR_BASE]
+            log(f"colour -> {self.config['colour']}")
+            self.draw()
         elif ident == MENU_ON_TOP:
             self.config["on_top"] = not bool(self.config["on_top"])
             self.apply_topmost()
@@ -861,10 +979,42 @@ class Widget:
         save_config(self.config)
         self.refresh_tray()
 
+    def refresh_fitted(self, why: str) -> None:
+        """Redraw after a change to what the text is or how it is set, keeping the widget
+        snug: the lines get longer or shorter, and so must the window."""
+        self.face = self.current_face()
+        _, _, width, _ = self.rect()
+        self.resize_to(width / self.scale)
+        log(f"face -> {self.face[0]}  {self.face[1]} ({why})")
+
+    def resize_to(self, width_css: float) -> None:
+        """Set the width (which sets the text size), then fit the height to the text.
+
+        The width grows if the text needs more room than asked for, so a long date in a wide
+        font is never cut off.
+        """
+        left, top, _, _ = self.rect()
+        scale = self.scale
+        width = max(int(MIN_CSS[0] * scale), int(round(width_css * scale)))
+        needed, height = surface.fit_size(*self.face, width, scale, self.font)
+        width = max(width, needed)
+        height = max(int(MIN_CSS[1] * scale), height)
+        user32.SetWindowPos(
+            wintypes.HWND(self.hwnd),
+            wintypes.HWND(0),
+            left,
+            top,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        self.draw()
+        self.save_geometry()
+
     def fit_to_text(self) -> None:
         """Trim the window height to the two lines, keeping the width and the position."""
         left, top, width, _ = self.rect()
-        _, height = surface.fit_size(*self.face, width, self.scale)
+        _, height = surface.fit_size(*self.face, width, self.scale, self.font)
         height = max(int(MIN_CSS[1] * self.scale), height)
         user32.SetWindowPos(
             wintypes.HWND(self.hwnd),
@@ -1176,7 +1326,26 @@ class Widget:
             )
             for ident, label, checked in self.menu_items()
         ]
+        pickers = [
+            pystray.MenuItem(
+                label,
+                pystray.Menu(
+                    *(
+                        pystray.MenuItem(
+                            text,
+                            action(ident),
+                            checked=(lambda item, on=checked: on),
+                            radio=True,
+                        )
+                        for ident, text, checked in entries
+                    )
+                ),
+            )
+            for label, entries in self.submenus()
+        ]
         return pystray.Menu(
+            *pickers,
+            pystray.Menu.SEPARATOR,
             *items,
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Fit to text", action(MENU_FIT)),
@@ -1204,6 +1373,9 @@ class Widget:
     def refresh_tray(self) -> None:
         if self.icon is not None:
             try:
+                # Rebuilt rather than just updated: the ticks are baked into the items when
+                # they are made, so an update alone would keep showing the old choices.
+                self.icon.menu = self.tray_menu()
                 self.icon.update_menu()
             except Exception:  # the tray is a convenience, never a reason to fail
                 log("could not refresh the tray menu:\n" + traceback.format_exc())
@@ -1255,18 +1427,22 @@ class Widget:
 def self_check() -> int:
     """Print what the widget would draw, without opening a window."""
     config = load_config()
-    face = engine.face(datetime.now(), bool(config["hour24"]))
+    face = face_for(config, datetime.now())
+    font = str(config.get("font", surface.DEFAULT_FONT))
     scale = 1.5
-    width, height = surface.fit_size(*face, int(200 * scale), scale)
+    width, height = surface.fit_size(*face, int(200 * scale), scale, font)
     print(f"face        : {face[0]}  /  {face[1]}")
     print(f"hour24      : {config['hour24']}")
     print(f"on top      : {config['on_top']}")
     print(f"on desktop  : {config.get('stay_on_desktop', True)}")
     print(f"draggable   : {config.get('draggable', True)}")
     print(f"autostart   : {autostart_installed()}")
+    print(f"size        : {config.get('size')}")
+    print(f"font        : {font}")
+    print(f"colour      : {config.get('colour')}")
     print(f"fitted size : {width}x{height} px ({width / scale:.0f}x{height / scale:.0f} css)")
     for ink in ("light", "dark"):
-        picture = surface.render(*face, ink, width, height, scale, hover=True)
+        picture = surface.render(*face, ink, width, height, scale, hover=True, font=font)
         alpha = Image.frombytes("RGBA", (width, height), picture.pixels).getchannel("A")
         opaque = sum(1 for value in alpha.getdata() if value > surface.HIT_ALPHA)
         block = sum(1 for value in alpha.getdata() if value == surface.HIT_ALPHA)
@@ -1280,9 +1456,14 @@ def self_check() -> int:
 
 def render_png(path: Path) -> int:
     """Write the face over a chequerboard, so the transparency is visible and not assumed."""
+    config = load_config()
     scale = 1.5
-    face = engine.face(datetime.now(), False)
-    width, height = surface.fit_size(*face, int(200 * scale), scale)
+    face = face_for(config, datetime.now())
+    font = str(config.get("font", surface.DEFAULT_FONT))
+    colour = str(config.get("colour", surface.DEFAULT_COLOUR))
+    width_css = SIZES.get(config.get("size"), ("", 200))[1]
+    width, height = surface.fit_size(*face, int(width_css * scale), scale, font)
+    width = max(width, int(width_css * scale))
     board = Image.new("RGBA", (width, height), (22, 26, 34, 255))
     draw = ImageDraw.Draw(board)
     step = 10
@@ -1291,7 +1472,9 @@ def render_png(path: Path) -> int:
             if (x // step + y // step) % 2:
                 draw.rectangle((x, y, x + step - 1, y + step - 1), fill=(236, 240, 246, 255))
     for index, ink in enumerate(("light", "dark")):
-        picture = surface.render(*face, ink, width, height, scale, hover=index == 1)
+        picture = surface.render(
+            *face, ink, width, height, scale, hover=index == 1, font=font, colour=colour
+        )
         layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         layer.paste(
             Image.frombytes("RGBA", (width, height), _straight(picture)).convert("RGBA"), (0, 0)
