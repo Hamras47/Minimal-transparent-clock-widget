@@ -278,6 +278,28 @@ user32.CreatePopupMenu.restype = wintypes.HMENU
 user32.MonitorFromWindow.restype = ctypes.c_void_p
 user32.RegisterClassW.restype = wintypes.WORD
 user32.DefWindowProcW.restype = ctypes.c_long
+
+
+#: Owned windows always sit above their owner.  Owning the widget to the desktop window
+#: (Progman) keeps it visible through Show Desktop without ever going topmost.
+GW_OWNER, GWLP_HWNDPARENT = 4, -8
+_get_owner = ctypes.WINFUNCTYPE(wintypes.HWND, wintypes.HWND, wintypes.UINT)(
+    ("GetWindow", ctypes.windll.user32))
+_set_owner = ctypes.WINFUNCTYPE(ctypes.c_void_p, wintypes.HWND, ctypes.c_int, ctypes.c_void_p)(
+    ("SetWindowLongPtrW", ctypes.windll.user32))
+_find_progman = ctypes.WINFUNCTYPE(wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)(
+    ("FindWindowW", ctypes.windll.user32))
+
+
+def attach_to_desktop(hwnd: int) -> bool:
+    """Own the widget to Progman.  True when the owner changed (first call / explorer restart)."""
+    progman = int(_find_progman("Progman", None) or 0)
+    if not progman or not hwnd:
+        return False
+    if int(_get_owner(hwnd, GW_OWNER) or 0) == progman:
+        return False
+    _set_owner(hwnd, GWLP_HWNDPARENT, progman)
+    return True
 user32.SetWindowLongW.restype = ctypes.c_long
 
 gdi32.GetPixel.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
@@ -1064,33 +1086,6 @@ class Widget:
         user32.GetClassNameW(wintypes.HWND(hwnd), name, 256)
         return name.value
 
-    def desktop_in_front(self) -> bool:
-        """Is the desktop what the user is looking at?
-
-        Asked at five points spread over the work area -- never over the widget itself, whose
-        own pixels would answer for it -- and decided by majority, because a single point can
-        land on a window that happens to be sitting there.  The widget's own window is skipped
-        for the same reason.
-        """
-        left, top, right, bottom = monitor_work_area(self.hwnd)
-        width, height = right - left, bottom - top
-        if width <= 0 or height <= 0:
-            return False
-        votes = 0
-        asked = 0
-        for fx, fy in ((0.17, 0.2), (0.5, 0.5), (0.83, 0.8), (0.17, 0.8), (0.83, 0.2)):
-            point = wintypes.POINT(int(left + width * fx), int(top + height * fy))
-            found = int(user32.WindowFromPoint(point) or 0)
-            if not found:
-                continue
-            root = int(user32.GetAncestor(wintypes.HWND(found), GA_ROOT) or found)
-            if root == self.hwnd:
-                continue
-            asked += 1
-            if self.class_of(root) in DESKTOP_CLASSES:
-                votes += 1
-        return asked >= 3 and votes * 2 > asked
-
     def borrow_topmost(self, borrow: bool, why: str = "") -> None:
         """Sit above the shell's desktop layer, or hand the front back to the user's windows.
 
@@ -1125,29 +1120,19 @@ class Widget:
             # Show Desktop minimizes the widget like any other window; being on the desktop
             # means coming straight back out of it.
             user32.ShowWindow(wintypes.HWND(self.hwnd), SW_RESTORE)
-        front = self.desktop_in_front()
-        self._desktop_front = front
-        self._desktop_streak = 0
-        self.borrow_topmost(front, "desktop up" if front else "windows back")
+        if attach_to_desktop(self.hwnd):
+            log("owned by the desktop window")
+        self.borrow_topmost(False, "on the desktop")
 
     def watch_desktop(self) -> None:
-        """Follow the desktop state, but only once it has settled.
+        """Re-own the widget if explorer recreated the desktop window.
 
-        The answer flickers while Show Desktop animates -- the desktop is only partly in front
-        for a few hundred milliseconds -- which was enough to make the widget borrow and hand
-        back topmost three times inside one second.  Two polls agreeing in a row is the settle,
-        and a poll that agrees with where the widget already is resets the count.
+        The widget used to borrow topmost whenever the desktop looked "in front" at a few
+        sample points, which misfired with non-maximized windows and left it floating over
+        the user's apps.  Being owned by Progman keeps it visible through Show Desktop instead.
         """
-        front = self.desktop_in_front()
-        if front == self._desktop_front:
-            self._desktop_streak = 0
-            return
-        self._desktop_streak += 1
-        if self._desktop_streak < 2:
-            return
-        self._desktop_streak = 0
-        self._desktop_front = front
-        self.borrow_topmost(front, "desktop up" if front else "windows back")
+        if attach_to_desktop(self.hwnd):
+            self.borrow_topmost(False, "re-owned by the new desktop window")
 
     # ------------------------------------------------------------- message
 

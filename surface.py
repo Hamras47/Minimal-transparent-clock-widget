@@ -96,6 +96,8 @@ CORNER_CSS = 20.0
 #: Alpha of the draggable block: one step out of 255.  Rainmeter's SolidColor trick, and the
 #: reason the widget can be moved without a visible surface.
 HIT_ALPHA = 1
+#: Text on the wallpaper is drawn at this opacity, so it blends in rather than glaring.
+BLEND = 0.8
 
 #: Time: 16% of the width; date: 6.2%.  The ceilings are high so the widget can be made
 #: genuinely big, from the Size menu or by dragging the corner.
@@ -332,6 +334,7 @@ def render(
         width,
         height,
     )
+    image.putalpha(image.getchannel("A").point(lambda v: int(v * BLEND)))
     block = Image.new("L", (width, height), 0)
     block_draw = ImageDraw.Draw(block)
     block_draw.rectangle((hit[0], hit[1], hit[2] - 1, hit[3] - 1), fill=HIT_ALPHA)
